@@ -1,0 +1,19 @@
+# Disabled buttons
+
+When a button is disabled, always add a **tooltip** that explains why:
+
+- Use the `title` attribute so users see the reason on hover.
+- Set `title` only when the button is disabled (e.g. `title={disabled ? 'Reason here' : undefined}`) so the tooltip does not appear when the button is enabled.
+
+Example:
+
+```tsx
+<button
+  disabled={loading}
+  title={loading ? 'Loading…' : undefined}
+>
+  Submit
+</button>
+```
+
+For accessibility, prefer also updating `aria-label` when disabled to include the reason (e.g. "Submit (disabled: loading)").
