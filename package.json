@@ -8,14 +8,16 @@
     "build": "vite build",
     "lint": "eslint .",
     "preview": "vite preview",
-    "server": "tsx server/index.ts",
+    "server": "tsx --watch server/index.ts",
     "dev:all": "concurrently \"npm run server\" \"npm run dev\""
   },
   "dependencies": {
+    "@types/multer": "^2.0.0",
     "bootstrap": "^5.3.8",
     "cors": "^2.8.6",
     "dotenv": "^17.3.1",
     "express": "^5.2.1",
+    "multer": "^2.0.2",
     "pg": "^8.18.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",

@@ -1,0 +1,31 @@
+modules:
+  jira:issuePanel:
+    - key: testllama-panel
+      title: TestLlama
+      description: View and manage linked test cases
+      resource: panel-resource
+      resolver:
+        function: resolver
+      icon: resource:icon
+
+  function:
+    - key: resolver
+      handler: src/resolvers/index.handler
+
+resources:
+  - key: panel-resource
+    path: src/frontend/build
+  - key: icon
+    path: src/frontend/public/testllama-icon.svg
+
+permissions:
+  scopes:
+    - read:jira-work
+  external:
+    fetch:
+      backend:
+        - 'your-testllama-domain.com'
+
+app:
+  id: ari:cloud:ecosystem::app/your-app-id
+  name: TestLlama

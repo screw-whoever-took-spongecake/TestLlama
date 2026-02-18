@@ -7,12 +7,13 @@ import {
   HiOutlineClipboardDocumentList,
   HiOutlinePlayCircle,
   HiOutlineChartBar,
+  HiOutlineCog6Tooth,
 } from 'react-icons/hi2';
 import type { IconType } from 'react-icons';
 
 const EXPAND_DURATION_MS = 300;
 
-export type TabId = 'home' | 'test-cases' | 'test-runs' | 'results';
+export type TabId = 'home' | 'test-cases' | 'test-runs' | 'results' | 'settings';
 
 interface MenuItem {
   id: TabId;
@@ -84,6 +85,23 @@ export default function Sidebar({ isOpen, onToggle, activeTab, onSelectTab }: Si
           );
         })}
       </nav>
+
+      <div className="sidebar-bottom">
+        <button
+          type="button"
+          className={`sidebar-item ${activeTab === 'settings' ? 'sidebar-item--active' : ''}`}
+          onClick={() => onSelectTab('settings')}
+          aria-label="Settings"
+        >
+          <HiOutlineCog6Tooth className="sidebar-item-icon" aria-hidden="true" />
+          <span
+            className={`sidebar-item-label ${labelsVisible ? 'sidebar-item-label--visible' : ''}`}
+            aria-hidden={!labelsVisible}
+          >
+            Settings
+          </span>
+        </button>
+      </div>
     </aside>
   );
 }

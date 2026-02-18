@@ -5,6 +5,7 @@ import Home from '../pages/Home';
 import TestCases from '../pages/TestCases';
 import TestRuns from '../pages/TestRuns';
 import Results from '../pages/Results';
+import Settings from '../pages/Settings';
 import type { ComponentType } from 'react';
 
 const PAGES: Record<TabId, ComponentType> = {
@@ -12,6 +13,7 @@ const PAGES: Record<TabId, ComponentType> = {
   'test-cases': TestCases,
   'test-runs': TestRuns,
   results: Results,
+  settings: Settings,
 };
 
 export interface DashboardOutletContext {

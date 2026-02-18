@@ -16,6 +16,26 @@ export default defineConfig({
         target: 'http://localhost:3001',
         changeOrigin: true,
       },
+      '/service/jira': {
+        target: 'http://localhost:3001',
+        changeOrigin: true,
+      },
+      '/service/settings': {
+        target: 'http://localhost:3001',
+        changeOrigin: true,
+      },
+      '/service/attachments': {
+        target: 'http://localhost:3001',
+        changeOrigin: true,
+      },
+      '/service/uploads': {
+        target: 'http://localhost:3001',
+        changeOrigin: true,
+      },
+      '/service/test-runs': {
+        target: 'http://localhost:3001',
+        changeOrigin: true,
+      },
     },
   },
 });
