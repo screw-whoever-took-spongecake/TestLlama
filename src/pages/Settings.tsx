@@ -3,6 +3,8 @@ import type { ReactElement, SyntheticEvent } from 'react';
 import { HiOutlineFolder, HiOutlinePencil, HiOutlineTrash, HiOutlineArrowsUpDown } from 'react-icons/hi2';
 import { useSettings } from '../contexts/SettingsContext';
 import { useToast } from '../components/Toast';
+import Tooltip from '../components/Tooltip';
+import type { Project } from '../types/testCase';
 
 const API = '/service';
 const NAME_MAX_LENGTH = 50;
@@ -23,12 +25,6 @@ function getUrlError(value: string): string | null {
   } catch {
     return 'Enter a valid URL (e.g. https://yourcompany.atlassian.net)';
   }
-}
-
-interface Project {
-  id: number;
-  name: string;
-  testCaseCount?: number;
 }
 
 export default function Settings(): ReactElement {
@@ -75,10 +71,10 @@ export default function Settings(): ReactElement {
     try {
       const res = await fetch(`${API}/projects`);
       if (!res.ok) throw new Error('Failed to load projects');
-      const data: { id: number; name: string; testCases?: { id: string }[] }[] = await res.json();
+      const data: { id: number; name: string; testCaseCount?: number }[] = await res.json();
       setProjects(
         Array.isArray(data)
-          ? data.map((p) => ({ id: p.id, name: p.name, testCaseCount: p.testCases?.length ?? 0 }))
+          ? data.map((p) => ({ id: p.id, name: p.name, testCaseCount: p.testCaseCount ?? 0 }))
           : []
       );
     } catch {
@@ -140,7 +136,7 @@ export default function Settings(): ReactElement {
           const data = await res.json().catch((): { error?: string } => ({}));
           throw new Error(data.error ?? 'Update failed');
         }
-        showToast('Project updated');
+        showToast('Workspace updated');
       } else {
         const res = await fetch(`${API}/projects`, {
           method: 'POST',
@@ -151,7 +147,7 @@ export default function Settings(): ReactElement {
           const data = await res.json().catch((): { error?: string } => ({}));
           throw new Error(data.error ?? 'Create failed');
         }
-        showToast('Project created');
+        showToast('Workspace created');
       }
       closeProjectModal();
       await fetchProjects();
@@ -172,7 +168,7 @@ export default function Settings(): ReactElement {
         const data = await res.json().catch((): { error?: string } => ({}));
         throw new Error(data.error ?? 'Delete failed');
       }
-      showToast('Project deleted');
+      showToast('Workspace deleted');
       await fetchProjects();
     } catch (err) {
       setProjectError(err instanceof Error ? err.message : 'Delete failed');
@@ -246,14 +242,14 @@ export default function Settings(): ReactElement {
           )}
         </div>
 
-        {/* ── Projects ──────────────────────────────────────────────────────── */}
+        {/* ── Workspaces ─────────────────────────────────────────────────────── */}
         <div className="settings-card">
           <div className="settings-section">
             <div className="settings-section-header">
               <div>
-                <h3 className="settings-section-title">Projects</h3>
+                <h3 className="settings-section-title">Workspaces</h3>
                 <p className="settings-section-desc">
-                  Projects are folders that organise your test cases. Create and manage them here.
+                  Each workspace is an isolated context for test cases and test runs. Switch between them using the sidebar dropdown.
                 </p>
               </div>
               <button
@@ -262,7 +258,7 @@ export default function Settings(): ReactElement {
                 onClick={openCreateProjectModal}
                 disabled={projectsLoading}
               >
-                + Create project
+                + Create workspace
               </button>
             </div>
 
@@ -271,9 +267,9 @@ export default function Settings(): ReactElement {
             )}
 
             {projectsLoading ? (
-              <p className="settings-projects-loading">Loading projects…</p>
+              <p className="settings-projects-loading">Loading workspaces…</p>
             ) : projects.length === 0 ? (
-              <p className="settings-projects-empty">No projects yet. Create one to get started.</p>
+              <p className="settings-projects-empty">No workspaces yet. Create one to get started.</p>
             ) : (
               <>
                 <div className="settings-sort-row">
@@ -290,7 +286,7 @@ export default function Settings(): ReactElement {
                     <option value="count-desc">Most test cases</option>
                     <option value="count-asc">Fewest test cases</option>
                   </select>
-                  <span className="settings-sort-count">{projects.length} project{projects.length !== 1 ? 's' : ''}</span>
+                  <span className="settings-sort-count">{projects.length} workspace{projects.length !== 1 ? 's' : ''}</span>
                 </div>
                 <ul className="settings-projects-list">
                   {sortedProjects.map((project) => (
@@ -305,20 +301,21 @@ export default function Settings(): ReactElement {
                           type="button"
                           className="test-case-btn test-case-btn--edit"
                           onClick={() => openEditProjectModal(project)}
-                          aria-label={`Edit project ${project.name}`}
+                          aria-label={`Rename workspace ${project.name}`}
                         >
                           <HiOutlinePencil aria-hidden="true" /> Rename
                         </button>
-                        <button
-                          type="button"
-                          className="test-case-btn test-case-btn--delete"
-                          onClick={() => handleDeleteProject(project.id, project.name, project.testCaseCount ?? 0)}
-                          disabled={(project.testCaseCount ?? 0) > 0}
-                          title={(project.testCaseCount ?? 0) > 0 ? 'Delete or move all test cases in this project first' : undefined}
-                          aria-label={`Delete project ${project.name}`}
-                        >
-                          <HiOutlineTrash aria-hidden="true" /> Delete
-                        </button>
+                        <Tooltip content={(project.testCaseCount ?? 0) > 0 ? 'Delete or move all test cases in this workspace first' : undefined}>
+                          <button
+                            type="button"
+                            className="test-case-btn test-case-btn--delete"
+                            onClick={() => handleDeleteProject(project.id, project.name, project.testCaseCount ?? 0)}
+                            disabled={(project.testCaseCount ?? 0) > 0}
+                            aria-label={`Delete workspace ${project.name}`}
+                          >
+                            <HiOutlineTrash aria-hidden="true" /> Delete
+                          </button>
+                        </Tooltip>
                       </div>
                     </li>
                   ))}
@@ -329,7 +326,7 @@ export default function Settings(): ReactElement {
         </div>
       </div>
 
-      {/* ── Project modal ──────────────────────────────────────────────────── */}
+      {/* ── Workspace modal ─────────────────────────────────────────────────── */}
       {projectModalOpen && (
         <div className="modal-overlay" onClick={closeProjectModal} role="presentation">
           <div
@@ -340,7 +337,7 @@ export default function Settings(): ReactElement {
             aria-labelledby="project-modal-title"
           >
             <h3 id="project-modal-title" className="modal-title">
-              {editingProjectId !== null ? 'Rename project' : 'Create project'}
+              {editingProjectId !== null ? 'Rename workspace' : 'Create workspace'}
             </h3>
             <form onSubmit={handleProjectSubmit} className="modal-form">
               <label htmlFor="settings-project-name" className="modal-label">
@@ -353,7 +350,7 @@ export default function Settings(): ReactElement {
                 value={projectFormName}
                 onChange={(e) => setProjectFormName(clampName(e.target.value))}
                 maxLength={NAME_MAX_LENGTH}
-                placeholder="e.g. API Tests"
+                placeholder="e.g. Catch"
                 required
                 autoFocus
               />

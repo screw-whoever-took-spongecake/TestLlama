@@ -1,6 +1,6 @@
 import type { StepAttachment } from './testCase';
 
-export type TestRunStatus = 'ready_to_test' | 'passed' | 'failed' | 'na';
+export type TestRunStatus = 'ready_to_test' | 'in_progress' | 'passed' | 'failed' | 'na';
 
 export type StepStatus = 'not_run' | 'passed' | 'failed' | 'na' | 'passed_with_improvements';
 
@@ -30,11 +30,20 @@ export interface TestRun {
   sourceTestCaseName: string;
   createdAt: string;
   updatedAt: string;
+  folderId?: number | null;
+  folderName?: string | null;
   steps?: TestRunStep[];
 }
 
-export interface ProjectWithRuns {
-  id: number | null;
+export interface TestRunFolder {
+  id: number;
   name: string;
-  testRuns: TestRun[];
+  projectId: number;
+}
+
+export interface TestRunJiraLink {
+  id: number;
+  testRunId: string;
+  jiraIssueKey: string;
+  createdAt: string;
 }

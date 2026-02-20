@@ -36,6 +36,14 @@ export default defineConfig({
         target: 'http://localhost:3001',
         changeOrigin: true,
       },
+      '/service/test-case-folders': {
+        target: 'http://localhost:3001',
+        changeOrigin: true,
+      },
+      '/service/test-run-folders': {
+        target: 'http://localhost:3001',
+        changeOrigin: true,
+      },
     },
   },
 });

@@ -1,26 +1,31 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import type { ReactElement } from 'react';
-import { useParams, useBlocker, useNavigate, useOutletContext } from 'react-router-dom';
+import { useParams, useNavigate } from 'react-router-dom';
 import { useToast } from '../components/Toast';
 import StepAttachmentsUpload from '../components/StepAttachmentsUpload';
-import type { TestRun, TestRunStep, TestRunStatus, StepStatus } from '../types/testRun';
+import ImageLightbox from '../components/ImageLightbox';
+import Tooltip from '../components/Tooltip';
+import { useSettings } from '../contexts/SettingsContext';
+import type { TestRun, TestRunStep, TestRunStatus, StepStatus, TestRunJiraLink } from '../types/testRun';
 import { isLockedStatus } from '../types/testRun';
 import type { StepAttachment } from '../types/testCase';
 import { useBreadcrumb } from '../contexts/BreadcrumbContext';
-import type { DashboardOutletContext } from '../components/DashboardContent';
+
+const JIRA_KEY_PATTERN = /^[A-Z][A-Z0-9]+-\d+$/;
 
 const STATUS_OPTIONS: { value: TestRunStatus; label: string }[] = [
   { value: 'ready_to_test', label: 'Ready to Test' },
+  { value: 'in_progress',   label: 'In Progress' },
   { value: 'passed',        label: 'Passed' },
   { value: 'failed',        label: 'Failed' },
   { value: 'na',            label: 'N/A' },
 ];
 
 const STEP_STATUS_OPTIONS: { value: StepStatus; label: string }[] = [
-  { value: 'not_run',                label: 'Not Run' },
-  { value: 'passed',                 label: 'Passed' },
-  { value: 'failed',                 label: 'Failed' },
-  { value: 'na',                     label: 'N/A' },
+  { value: 'not_run',                 label: 'Not Run' },
+  { value: 'passed',                  label: 'Passed' },
+  { value: 'failed',                  label: 'Failed' },
+  { value: 'na',                      label: 'N/A' },
   { value: 'passed_with_improvements', label: 'Passed w/ Improvements' },
 ];
 
@@ -45,46 +50,48 @@ interface EditableStep extends TestRunStep {
   attachmentError?: string;
 }
 
+type SaveState = 'idle' | 'saving' | 'saved' | 'error';
+
 export default function TestRunForm(): ReactElement {
   const { testRunId } = useParams<{ testRunId: string }>();
   const { showToast } = useToast();
   const navigate = useNavigate();
-  const { setActiveTab } = useOutletContext<DashboardOutletContext>();
   const { setOverride } = useBreadcrumb();
+  const { settings } = useSettings();
 
   const [run, setRun]         = useState<TestRun | null>(null);
   const [steps, setSteps]     = useState<EditableStep[]>([]);
   const [status, setStatus]   = useState<TestRunStatus>('ready_to_test');
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [saving, setSaving]   = useState(false);
-  const [isDirty, setIsDirty] = useState(false);
+  const [saveState, setSaveState] = useState<SaveState>('idle');
+  const [lightbox, setLightbox] = useState<{ src: string; alt: string } | null>(null);
 
-  // ── unsaved-changes guard ───────────────────────────────────────────────────
+  // Jira links state
+  const [jiraLinks, setJiraLinks]       = useState<TestRunJiraLink[]>([]);
+  const [jiraKeyInput, setJiraKeyInput] = useState('');
+  const [jiraLoading, setJiraLoading]   = useState(false);
+  const [jiraError, setJiraError]       = useState<string | null>(null);
 
-  // Block React Router in-app navigation when there are unsaved changes.
-  const blocker = useBlocker(isDirty);
+  // Used to skip the auto-save effect that fires when data first loads.
+  const loadedRef      = useRef(false);
+  const autoSaveTimer  = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const savedFadeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Tracks the status that was last successfully persisted to the DB.
+  // doSave uses this to decide whether steps should be included: steps are only
+  // saved when the run was NOT locked at the time of the last save. This ensures
+  // that a status change is the only thing that can happen while locked, and that
+  // any step edits made before transitioning TO a locked status are flushed.
+  const lastSavedStatusRef = useRef<TestRunStatus>('ready_to_test');
+
+  // ── cleanup on unmount ──────────────────────────────────────────────────────
 
   useEffect(() => {
-    if (blocker.state === 'blocked') {
-      const leave = window.confirm('You have unsaved changes. Leave without saving?');
-      if (leave) {
-        blocker.proceed();
-      } else {
-        blocker.reset();
-      }
-    }
-  }, [blocker, blocker.state]);
-
-  // Block browser-level navigation (tab close, refresh, address bar).
-  useEffect(() => {
-    if (!isDirty) return;
-    const handler = (e: BeforeUnloadEvent) => {
-      e.preventDefault();
+    return () => {
+      if (savedFadeTimer.current) clearTimeout(savedFadeTimer.current);
     };
-    window.addEventListener('beforeunload', handler);
-    return () => window.removeEventListener('beforeunload', handler);
-  }, [isDirty]);
+  }, []);
 
   // ── fetch ──────────────────────────────────────────────────────────────────
 
@@ -96,14 +103,19 @@ export default function TestRunForm(): ReactElement {
       const res = await fetch(`/service/test-runs/${encodeURIComponent(testRunId)}`);
       if (!res.ok) throw new Error('Failed to load test run');
       const data: TestRun & { steps: TestRunStep[] } = await res.json();
+      // Reset the guard here — after the await — so it is still false when the
+      // auto-save effect fires after the state updates below are applied. Setting
+      // it before the fetch (as before) let the initial-mount effect consume the
+      // false first, leaving the guard true by the time real data arrived.
+      loadedRef.current = false;
       setRun(data);
-      setStatus(data.status as TestRunStatus);
+      setStatus(data.status);
+      lastSavedStatusRef.current = data.status;
       setSteps(
         Array.isArray(data.steps)
-          ? data.steps.map((s) => ({ ...s, stepStatus: (s.stepStatus as StepStatus) ?? 'not_run' }))
+          ? data.steps.map((s) => ({ ...s, stepStatus: s.stepStatus ?? 'not_run' }))
           : []
       );
-      setIsDirty(false);
     } catch {
       setLoadError('Failed to load test run. It may have been deleted.');
     } finally {
@@ -116,12 +128,10 @@ export default function TestRunForm(): ReactElement {
   }, [fetchRun]);
 
   // ── Breadcrumb ─────────────────────────────────────────────────────────────
+
   useEffect(() => {
     if (!run) return;
-    const goToTestRuns = (): void => {
-      setActiveTab('test-runs');
-      navigate('/');
-    };
+    const goToTestRuns = (): void => void navigate('/test-runs');
     const segments = [
       ...(run.projectName ? [{ label: run.projectName, onClick: goToTestRuns }] : []),
       { label: 'Test Runs', onClick: goToTestRuns },
@@ -129,58 +139,84 @@ export default function TestRunForm(): ReactElement {
     ];
     setOverride(segments);
     return () => setOverride(null);
-  }, [run, setOverride, setActiveTab, navigate]);
+  }, [run, setOverride, navigate]);
 
-  // ── step field helpers ──────────────────────────────────────────────────────
+  // ── Jira links ──────────────────────────────────────────────────────────────
 
-  function handleActualResultChange(index: number, value: string): void {
-    setIsDirty(true);
-    setSteps((prev) =>
-      prev.map((s, i) => (i === index ? { ...s, actualResults: value } : s))
-    );
+  const fetchJiraLinks = useCallback(async () => {
+    if (!testRunId) return;
+    setJiraLoading(true);
+    setJiraError(null);
+    try {
+      const res = await fetch(`/service/jira/run-links?testRunId=${encodeURIComponent(testRunId)}`);
+      if (res.ok) {
+        const data: TestRunJiraLink[] = await res.json();
+        setJiraLinks(Array.isArray(data) ? data : []);
+      }
+    } catch {
+      setJiraError('Failed to load Jira links');
+    } finally {
+      setJiraLoading(false);
+    }
+  }, [testRunId]);
+
+  useEffect(() => {
+    fetchJiraLinks();
+  }, [fetchJiraLinks]);
+
+  async function handleAddJiraLink(): Promise<void> {
+    const key = jiraKeyInput.trim().toUpperCase();
+    if (!key) return;
+    if (!JIRA_KEY_PATTERN.test(key)) {
+      setJiraError('Enter a valid Jira issue key (e.g. PROJ-123)');
+      return;
+    }
+    setJiraError(null);
+    try {
+      const res = await fetch('/service/jira/run-links', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ testRunId, jiraIssueKey: key }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error((data as { error?: string }).error ?? 'Failed to link');
+      }
+      setJiraKeyInput('');
+      await fetchJiraLinks();
+    } catch (err) {
+      setJiraError(err instanceof Error ? err.message : 'Failed to link');
+    }
   }
 
-  function handleCheckboxChange(index: number, checked: boolean): void {
-    setIsDirty(true);
-    setSteps((prev) =>
-      prev.map((s, i) => (i === index ? { ...s, checked } : s))
-    );
-  }
-
-  function handleActualAttachmentsChange(index: number, attachments: StepAttachment[]): void {
-    setIsDirty(true);
-    setSteps((prev) =>
-      prev.map((s, i) => (i === index ? { ...s, actualResultAttachments: attachments } : s))
-    );
-  }
-
-  function handleActualAttachmentError(index: number, msg: string | undefined): void {
-    setSteps((prev) =>
-      prev.map((s, i) => (i === index ? { ...s, attachmentError: msg } : s))
-    );
-  }
-
-  function handleStepStatusChange(index: number, stepStatus: StepStatus): void {
-    setIsDirty(true);
-    setSteps((prev) =>
-      prev.map((s, i) => (i === index ? { ...s, stepStatus } : s))
-    );
+  async function handleRemoveJiraLink(linkId: number): Promise<void> {
+    setJiraError(null);
+    try {
+      const res = await fetch(`/service/jira/run-links/${linkId}`, { method: 'DELETE' });
+      if (!res.ok) throw new Error('Failed to unlink');
+      await fetchJiraLinks();
+    } catch (err) {
+      setJiraError(err instanceof Error ? err.message : 'Failed to unlink');
+    }
   }
 
   // ── save ────────────────────────────────────────────────────────────────────
 
-  async function handleSave(): Promise<void> {
-    if (!testRunId || saving) return;
-    setSaving(true);
+  const doSave = useCallback(async (currentStatus: TestRunStatus, currentSteps: EditableStep[]) => {
+    if (!testRunId) return;
+    setSaveState('saving');
     try {
-      const isLocked = isLockedStatus(status);
+      // Include steps only if the run was NOT locked when we last saved.
+      // This enforces that status is the only change allowed while locked, while
+      // still flushing any pending step edits when transitioning TO a locked status.
+      const wasLocked = isLockedStatus(lastSavedStatusRef.current);
       const body: {
         status: string;
         steps?: { id: number; actualResults: string; actualResultAttachments: StepAttachment[]; checked: boolean; stepStatus: StepStatus }[];
-      } = { status };
+      } = { status: currentStatus };
 
-      if (!isLocked) {
-        body.steps = steps.map((s) => ({
+      if (!wasLocked) {
+        body.steps = currentSteps.map((s) => ({
           id: s.id,
           actualResults: s.actualResults,
           actualResultAttachments: s.actualResultAttachments,
@@ -201,16 +237,80 @@ export default function TestRunForm(): ReactElement {
       }
 
       const updated: TestRun & { steps: TestRunStep[] } = await res.json();
+      // Update run metadata (timestamps etc.) without touching status/steps
+      // so we don't re-trigger the auto-save effect.
       setRun(updated);
-      setStatus(updated.status as TestRunStatus);
-      setSteps(updated.steps ? updated.steps.map((s) => ({ ...s, stepStatus: (s.stepStatus as StepStatus) ?? 'not_run' })) : []);
-      setIsDirty(false);
-      showToast('Test run saved');
+      lastSavedStatusRef.current = currentStatus;
+      setSaveState('saved');
+      if (savedFadeTimer.current) clearTimeout(savedFadeTimer.current);
+      savedFadeTimer.current = setTimeout(() => setSaveState('idle'), 2000);
     } catch (err) {
+      setSaveState('error');
       showToast(err instanceof Error ? err.message : 'Save failed');
-    } finally {
-      setSaving(false);
     }
+  }, [testRunId, showToast]);
+
+  // ── auto-save on change ─────────────────────────────────────────────────────
+
+  useEffect(() => {
+    // Skip the flush that happens when fetchRun populates state.
+    if (!loadedRef.current) {
+      loadedRef.current = true;
+      return;
+    }
+    if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current);
+    autoSaveTimer.current = setTimeout(() => {
+      void doSave(status, steps);
+    }, 800);
+    return () => {
+      if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current);
+    };
+  }, [status, steps, doSave]);
+
+  // ── keyboard shortcut (immediate save, bypasses debounce) ──────────────────
+
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent): void {
+      if ((e.metaKey || e.ctrlKey) && e.key === 's') {
+        e.preventDefault();
+        if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current);
+        void doSave(status, steps);
+      }
+    }
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [doSave, status, steps]);
+
+  // ── step field helpers ──────────────────────────────────────────────────────
+
+  function handleActualResultChange(index: number, value: string): void {
+    setSteps((prev) =>
+      prev.map((s, i) => (i === index ? { ...s, actualResults: value } : s))
+    );
+  }
+
+  function handleCheckboxChange(index: number, checked: boolean): void {
+    setSteps((prev) =>
+      prev.map((s, i) => (i === index ? { ...s, checked } : s))
+    );
+  }
+
+  function handleActualAttachmentsChange(index: number, attachments: StepAttachment[]): void {
+    setSteps((prev) =>
+      prev.map((s, i) => (i === index ? { ...s, actualResultAttachments: attachments } : s))
+    );
+  }
+
+  function handleActualAttachmentError(index: number, msg: string | undefined): void {
+    setSteps((prev) =>
+      prev.map((s, i) => (i === index ? { ...s, attachmentError: msg } : s))
+    );
+  }
+
+  function handleStepStatusChange(index: number, stepStatus: StepStatus): void {
+    setSteps((prev) =>
+      prev.map((s, i) => (i === index ? { ...s, stepStatus } : s))
+    );
   }
 
   // ── render ─────────────────────────────────────────────────────────────────
@@ -235,24 +335,109 @@ export default function TestRunForm(): ReactElement {
 
   return (
     <section className="page page--full-width">
-      {/* ── Header — mirrors test-case-header-row ────────────────────────── */}
+      {lightbox && (
+        <ImageLightbox
+          src={lightbox.src}
+          alt={lightbox.alt}
+          onClose={() => setLightbox(null)}
+        />
+      )}
+
+      {/* ── Header ── */}
       <div className="test-case-header-row">
         <h2>TR-{run.id} &middot; {run.name}</h2>
 
-        <div className="test-run-status-selector">
-          <label htmlFor="run-status-select" className="test-run-status-label">
-            Status
-          </label>
-          <select
-            id="run-status-select"
-            className="test-run-status-select"
-            value={status}
-            onChange={(e) => { setStatus(e.target.value as TestRunStatus); setIsDirty(true); }}
+        {/* Linked Jira Issues — inline in header */}
+        <div className="jira-links-inline">
+          {jiraError && (
+            <span className="jira-links-error" role="alert">{jiraError}</span>
+          )}
+
+          {jiraLoading ? (
+            <span className="jira-links-loading">Loading…</span>
+          ) : jiraLinks.length === 0 ? (
+            <span className="jira-links-empty">No linked Jira issues.</span>
+          ) : (
+            jiraLinks.map((link) => (
+              <span key={link.id} className="jira-link-chip-wrapper">
+                <Tooltip
+                  content={
+                    settings.jiraBaseUrl
+                      ? `Open ${link.jiraIssueKey} in Jira`
+                      : 'Set a Jira Base URL in Settings to enable this link'
+                  }
+                >
+                  <a
+                    href={
+                      settings.jiraBaseUrl
+                        ? `${settings.jiraBaseUrl}/browse/${link.jiraIssueKey}`
+                        : undefined
+                    }
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className={`jira-link-chip${!settings.jiraBaseUrl ? ' jira-link-chip--no-url' : ''}`}
+                  >
+                    {link.jiraIssueKey}
+                  </a>
+                </Tooltip>
+                <Tooltip content="Unlink">
+                  <button
+                    type="button"
+                    className="jira-link-chip-remove"
+                    onClick={() => handleRemoveJiraLink(link.id)}
+                    aria-label={`Unlink ${link.jiraIssueKey}`}
+                  >
+                    ×
+                  </button>
+                </Tooltip>
+              </span>
+            ))
+          )}
+
+          <input
+            type="text"
+            className="modal-input jira-links-input"
+            placeholder="PROJ-123"
+            value={jiraKeyInput}
+            onChange={(e) => setJiraKeyInput(e.target.value.toUpperCase())}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault();
+                void handleAddJiraLink();
+              }
+            }}
+          />
+          <button
+            type="button"
+            className="modal-btn modal-btn--primary jira-links-add-btn"
+            onClick={() => void handleAddJiraLink()}
           >
-            {STATUS_OPTIONS.map((opt) => (
-              <option key={opt.value} value={opt.value}>{opt.label}</option>
-            ))}
-          </select>
+            Link
+          </button>
+        </div>
+
+        <div className="test-run-header-right">
+          <div className="test-run-status-selector">
+            <label htmlFor="run-status-select" className="test-run-status-label">
+              Status
+            </label>
+            <select
+              id="run-status-select"
+              className={`test-run-status-select test-run-status-select--${status}`}
+              value={status}
+              onChange={(e) => setStatus(e.target.value as TestRunStatus)}
+            >
+              {STATUS_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>{opt.label}</option>
+              ))}
+            </select>
+          </div>
+
+          <span className={`test-run-autosave-indicator test-run-autosave-indicator--${saveState}`}>
+            {saveState === 'saving' && 'Saving…'}
+            {saveState === 'saved'  && '✓ Saved'}
+            {saveState === 'error'  && 'Save failed'}
+          </span>
         </div>
       </div>
 
@@ -278,9 +463,8 @@ export default function TestRunForm(): ReactElement {
       {/* ── Lock banner ─────────────────────────────────────────────────── */}
       {isLocked && (
         <div className="test-run-lock-banner" role="status">
-          {status === 'passed'
-            ? 'This test run is marked as Passed and is locked. Step data cannot be edited.'
-            : 'This test run is marked as Failed and is locked. Step data cannot be edited.'}
+          This test run is marked as {status === 'passed' ? 'Passed' : 'Failed'} and is locked.
+          {' '}Step data cannot be edited. Only the status can be changed.
         </div>
       )}
 
@@ -296,62 +480,64 @@ export default function TestRunForm(): ReactElement {
             <div className="test-case-step-header">
               <span className="test-case-step-number">Step {step.position}</span>
               <div className="test-case-step-header-actions">
-                <select
-                  className={`step-status-select step-status-select--${step.stepStatus}`}
-                  value={step.stepStatus}
-                  onChange={(e) => handleStepStatusChange(index, e.target.value as StepStatus)}
-                  disabled={isLocked}
-                  title={isLocked ? LOCKED_STEP_TITLE : 'Set step result status'}
-                  aria-label={`Step ${step.position} status`}
-                >
-                  {STEP_STATUS_OPTIONS.map((opt) => (
-                    <option key={opt.value} value={opt.value}>{opt.label}</option>
-                  ))}
-                </select>
-                <label
-                  className="test-run-checkbox-label"
-                  title={isLocked ? LOCKED_STEP_TITLE : 'Mark step complete'}
-                >
-                  <input
-                    type="checkbox"
-                    className="test-run-step-checkbox"
-                    checked={step.checked}
-                    onChange={(e) => handleCheckboxChange(index, e.target.checked)}
+                <Tooltip content={isLocked ? LOCKED_STEP_TITLE : 'Set step result status'}>
+                  <select
+                    className={`step-status-select step-status-select--${step.stepStatus}`}
+                    value={step.stepStatus}
+                    onChange={(e) => handleStepStatusChange(index, e.target.value as StepStatus)}
                     disabled={isLocked}
-                    aria-label={`Step ${step.position} complete`}
-                  />
-                  Done
-                </label>
+                    aria-label={`Step ${step.position} status`}
+                  >
+                    {STEP_STATUS_OPTIONS.map((opt) => (
+                      <option key={opt.value} value={opt.value}>{opt.label}</option>
+                    ))}
+                  </select>
+                </Tooltip>
+                <Tooltip content={isLocked ? LOCKED_STEP_TITLE : 'Mark step complete'}>
+                  <label className="test-run-checkbox-label">
+                    <input
+                      type="checkbox"
+                      className="test-run-step-checkbox"
+                      checked={step.checked}
+                      onChange={(e) => handleCheckboxChange(index, e.target.checked)}
+                      disabled={isLocked}
+                      aria-label={`Step ${step.position} complete`}
+                    />
+                    Done
+                  </label>
+                </Tooltip>
               </div>
             </div>
 
             {/* Step description + Expected results — side by side like test case form */}
             <div className="test-case-step-row">
               <div className="test-case-step-col">
-                <label className="test-case-step-label" htmlFor={`step-desc-${step.id}`}>
-                  Step description
-                </label>
+                <Tooltip content={STEP_IMMUTABLE_TITLE} position="bottom">
+                  <label className="test-case-step-label" htmlFor={`step-desc-${step.id}`}>
+                    Step description
+                  </label>
+                </Tooltip>
                 <textarea
                   id={`step-desc-${step.id}`}
-                  className="modal-input test-case-step-textarea"
+                  className="modal-input modal-input--immutable test-case-step-textarea"
                   value={step.stepDescription}
                   readOnly
-                  disabled
-                  title={STEP_IMMUTABLE_TITLE}
+                  tabIndex={-1}
                   rows={3}
                 />
               </div>
               <div className="test-case-step-col">
-                <label className="test-case-step-label" htmlFor={`step-expected-${step.id}`}>
-                  Expected results
-                </label>
+                <Tooltip content={STEP_IMMUTABLE_TITLE} position="bottom">
+                  <label className="test-case-step-label" htmlFor={`step-expected-${step.id}`}>
+                    Expected results
+                  </label>
+                </Tooltip>
                 <textarea
                   id={`step-expected-${step.id}`}
-                  className="modal-input test-case-step-textarea"
+                  className="modal-input modal-input--immutable test-case-step-textarea"
                   value={step.expectedResults}
                   readOnly
-                  disabled
-                  title={STEP_IMMUTABLE_TITLE}
+                  tabIndex={-1}
                   rows={3}
                 />
               </div>
@@ -360,18 +546,20 @@ export default function TestRunForm(): ReactElement {
             {/* Test case attachments — immutable, read-only thumbnails */}
             {step.attachments.length > 0 && (
               <div className="test-case-step-attachments">
-                <span className="test-case-step-label" title={STEP_IMMUTABLE_TITLE}>
-                  Test case attachments
-                </span>
+                <Tooltip content={STEP_IMMUTABLE_TITLE} position="bottom">
+                  <span className="test-case-step-label">Test case attachments</span>
+                </Tooltip>
                 <div className="step-attachments-grid">
                   {step.attachments.map((att) => (
                     <div key={att.id} className="step-attachment-thumb step-attachment-thumb--readonly">
-                      <img
-                        src={att.url}
-                        alt={att.filename}
-                        className="step-attachment-img"
-                        title={STEP_IMMUTABLE_TITLE}
-                      />
+                      <Tooltip content="Click to enlarge">
+                        <img
+                          src={att.url}
+                          alt={att.filename}
+                          className="step-attachment-img step-attachment-img--clickable"
+                          onClick={() => setLightbox({ src: att.url, alt: att.filename })}
+                        />
+                      </Tooltip>
                       <span className="step-attachment-name" title={att.filename}>
                         {att.filename}
                       </span>
@@ -383,16 +571,17 @@ export default function TestRunForm(): ReactElement {
 
             {/* Actual results — editable unless locked */}
             <div className="test-case-step-attachments">
-              <label className="test-case-step-label" htmlFor={`step-actual-${step.id}`}>
-                Actual results
-              </label>
+              <Tooltip content={isLocked ? LOCKED_STEP_TITLE : undefined} position="bottom">
+                <label className="test-case-step-label" htmlFor={`step-actual-${step.id}`}>
+                  Actual results
+                </label>
+              </Tooltip>
               <textarea
                 id={`step-actual-${step.id}`}
                 className="modal-input test-case-step-textarea"
                 value={step.actualResults}
                 onChange={(e) => handleActualResultChange(index, e.target.value)}
                 disabled={isLocked}
-                title={isLocked ? LOCKED_STEP_TITLE : undefined}
                 placeholder={isLocked ? undefined : 'Describe what actually happened…'}
                 rows={3}
               />
@@ -412,19 +601,6 @@ export default function TestRunForm(): ReactElement {
           </div>
         ))
       )}
-
-      {/* ── Save — mirrors test-case-form-actions ───────────────────────── */}
-      <div className="test-case-form-actions">
-        <button
-          type="button"
-          className="modal-btn modal-btn--primary"
-          onClick={handleSave}
-          disabled={saving}
-        >
-          {saving && <span className="btn-spinner" aria-hidden="true" />}
-          {saving ? 'Saving…' : 'Save'}
-        </button>
-      </div>
     </section>
   );
 }

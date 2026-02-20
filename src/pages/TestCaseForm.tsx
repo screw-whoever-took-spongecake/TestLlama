@@ -1,15 +1,18 @@
 import { useState, useEffect, useCallback, useRef, useLayoutEffect } from 'react';
 import type { ReactElement, SyntheticEvent } from 'react';
-import { useParams, useNavigate, useOutletContext } from 'react-router-dom';
+import { useParams, useNavigate, useBlocker } from 'react-router-dom';
 import { HiOutlineTrash } from 'react-icons/hi2';
 import { useToast } from '../components/Toast';
 import { useSettings } from '../contexts/SettingsContext';
 import StepAttachmentsUpload from '../components/StepAttachmentsUpload';
+import Tooltip from '../components/Tooltip';
 import type { JiraLink, TestCaseStep, StepAttachment } from '../types/testCase';
 import { useBreadcrumb } from '../contexts/BreadcrumbContext';
-import type { DashboardOutletContext } from '../components/DashboardContent';
+import { useBeforeUnload } from '../hooks/useBeforeUnload';
 
 const JIRA_KEY_PATTERN = /^[A-Z][A-Z0-9]+-\d+$/;
+const IS_MAC = navigator.userAgent.includes('Mac');
+const SAVE_SHORTCUT_HINT = IS_MAC ? '⌘ / Ctrl' : 'Ctrl';
 
 /** Internal step type with a stable client-side uid for animation keys. */
 interface StepWithUid extends TestCaseStep {
@@ -37,7 +40,6 @@ export default function TestCaseForm(): ReactElement {
   const { showToast } = useToast();
   const { settings } = useSettings();
   const navigate = useNavigate();
-  const { setActiveTab } = useOutletContext<DashboardOutletContext>();
   const { setOverride } = useBreadcrumb();
 
   const [steps, setSteps] = useState<StepWithUid[]>([emptyStep(1)]);
@@ -58,6 +60,24 @@ export default function TestCaseForm(): ReactElement {
   const [jiraKeyInput, setJiraKeyInput] = useState('');
   const [jiraLoading, setJiraLoading] = useState(false);
   const [jiraError, setJiraError] = useState<string | null>(null);
+
+  // Dirty tracking — true when steps/attachments or jiraLinks have changed since last save.
+  // jiraKeyInput being non-empty also counts (user has a pending link to add).
+  const [isFormDirty, setIsFormDirty] = useState(false);
+  const isDirty = isFormDirty || jiraKeyInput.trim().length > 0;
+
+  // Block React Router in-app navigation when dirty.
+  const blocker = useBlocker(isDirty);
+  useEffect(() => {
+    if (blocker.state === 'blocked') {
+      const leave = window.confirm('You have unsaved changes. Leave without saving?');
+      if (leave) blocker.proceed();
+      else blocker.reset();
+    }
+  }, [blocker]);
+
+  // Block browser-level navigation (tab close, refresh, address bar) when dirty.
+  useBeforeUnload(isDirty);
 
   /** Snapshot current positions before a reorder. */
   function snapshotPositions(): void {
@@ -133,10 +153,7 @@ export default function TestCaseForm(): ReactElement {
   // ── Breadcrumb ─────────────────────────────────────────────────────────────
   useEffect(() => {
     if (!testCaseName) return;
-    const goToTestCases = (): void => {
-      setActiveTab('test-cases');
-      navigate('/');
-    };
+    const goToTestCases = (): void => void navigate('/test-cases');
     const segments = [
       ...(testCaseProjectName ? [{ label: testCaseProjectName, onClick: goToTestCases }] : []),
       { label: 'Test Cases', onClick: goToTestCases },
@@ -144,7 +161,7 @@ export default function TestCaseForm(): ReactElement {
     ];
     setOverride(segments);
     return () => setOverride(null);
-  }, [testCaseName, testCaseProjectName, testCaseId, setOverride, setActiveTab, navigate]);
+  }, [testCaseName, testCaseProjectName, testCaseId, setOverride, navigate]);
 
   const fetchJiraLinks = useCallback(async () => {
     if (!testCaseId) return;
@@ -169,6 +186,7 @@ export default function TestCaseForm(): ReactElement {
 
   // Step text field management
   function handleStepChange(index: number, field: 'stepDescription' | 'expectedResults', value: string): void {
+    setIsFormDirty(true);
     setSteps((prev) =>
       prev.map((step, i) => (i === index ? { ...step, [field]: value } : step))
     );
@@ -176,6 +194,7 @@ export default function TestCaseForm(): ReactElement {
 
   // Attachment management
   function handleAttachmentsChange(index: number, attachments: StepAttachment[]): void {
+    setIsFormDirty(true);
     setSteps((prev) =>
       prev.map((step, i) => (i === index ? { ...step, attachments } : step))
     );
@@ -189,15 +208,19 @@ export default function TestCaseForm(): ReactElement {
   }
 
   function handleAddStep(): void {
+    setIsFormDirty(true);
     setSteps((prev) => [...prev, emptyStep(prev.length + 1)]);
   }
 
-  // Keyboard shortcuts
+  // Keyboard shortcuts — registered once on mount.
+  // Both handlers only touch refs or call stable setter functions with
+  // functional updates, so no stale-closure risk with an empty dep array.
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent): void {
       if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
         e.preventDefault();
-        handleAddStep();
+        setIsFormDirty(true);
+        setSteps((prev) => [...prev, emptyStep(prev.length + 1)]);
       }
       if ((e.metaKey || e.ctrlKey) && e.key === 's') {
         e.preventDefault();
@@ -206,10 +229,11 @@ export default function TestCaseForm(): ReactElement {
     }
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  });
+  }, []);
 
   function handleMoveStepUp(index: number): void {
     if (index <= 0) return;
+    setIsFormDirty(true);
     snapshotPositions();
     setSteps((prev) => {
       const next = [...prev];
@@ -219,6 +243,7 @@ export default function TestCaseForm(): ReactElement {
   }
 
   function handleMoveStepDown(index: number): void {
+    setIsFormDirty(true);
     snapshotPositions();
     setSteps((prev) => {
       if (index >= prev.length - 1) return prev;
@@ -231,6 +256,7 @@ export default function TestCaseForm(): ReactElement {
   function handleDeleteStep(index: number): void {
     const confirmed = window.confirm(`Are you sure you want to delete Step ${index + 1}?`);
     if (!confirmed) return;
+    setIsFormDirty(true);
     setSteps((prev) => {
       if (prev.length <= 1) return prev;
       const next = prev.filter((_, i) => i !== index);
@@ -257,6 +283,7 @@ export default function TestCaseForm(): ReactElement {
         throw new Error((data as { error?: string }).error ?? 'Failed to link');
       }
       setJiraKeyInput('');
+      setIsFormDirty(true);
       await fetchJiraLinks();
     } catch (err) {
       setJiraError(err instanceof Error ? err.message : 'Failed to link');
@@ -268,6 +295,7 @@ export default function TestCaseForm(): ReactElement {
     try {
       const res = await fetch(`/service/jira/links/${linkId}`, { method: 'DELETE' });
       if (!res.ok) throw new Error('Failed to unlink');
+      setIsFormDirty(true);
       await fetchJiraLinks();
     } catch (err) {
       setJiraError(err instanceof Error ? err.message : 'Failed to unlink');
@@ -276,7 +304,7 @@ export default function TestCaseForm(): ReactElement {
 
   async function handleSave(e: SyntheticEvent<HTMLFormElement>): Promise<void> {
     e.preventDefault();
-    if (!testCaseId || testCaseProjectId == null) return;
+    if (saving || !testCaseId || testCaseProjectId == null) return;
     setSaving(true);
     try {
       const res = await fetch(`/service/test-cases/${encodeURIComponent(testCaseId)}`, {
@@ -312,6 +340,7 @@ export default function TestCaseForm(): ReactElement {
           )
         );
       }
+      setIsFormDirty(false);
       showToast('Test case saved successfully');
     } catch (err) {
       console.error('Save failed:', err);
@@ -362,33 +391,37 @@ export default function TestCaseForm(): ReactElement {
             <span className="jira-links-empty">No linked Jira issues.</span>
           ) : (
             jiraLinks.map((link) => (
-              <span key={link.id} className="jira-link-chip">
-                <a
-                  href={
-                    settings.jiraBaseUrl
-                      ? `${settings.jiraBaseUrl}/browse/${link.jiraIssueKey}`
-                      : undefined
-                  }
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className={`jira-link-chip-key${!settings.jiraBaseUrl ? ' jira-link-chip-key--no-url' : ''}`}
-                  title={
+              <span key={link.id} className="jira-link-chip-wrapper">
+                <Tooltip
+                  content={
                     settings.jiraBaseUrl
                       ? `Open ${link.jiraIssueKey} in Jira`
                       : 'Set a Jira Base URL in Settings to enable this link'
                   }
                 >
-                  {link.jiraIssueKey}
-                </a>
-                <button
-                  type="button"
-                  className="jira-link-chip-remove"
-                  onClick={() => handleRemoveJiraLink(link.id)}
-                  aria-label={`Unlink ${link.jiraIssueKey}`}
-                  title="Unlink"
-                >
-                  ×
-                </button>
+                  <a
+                    href={
+                      settings.jiraBaseUrl
+                        ? `${settings.jiraBaseUrl}/browse/${link.jiraIssueKey}`
+                        : undefined
+                    }
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className={`jira-link-chip${!settings.jiraBaseUrl ? ' jira-link-chip--no-url' : ''}`}
+                  >
+                    {link.jiraIssueKey}
+                  </a>
+                </Tooltip>
+                <Tooltip content="Unlink">
+                  <button
+                    type="button"
+                    className="jira-link-chip-remove"
+                    onClick={() => handleRemoveJiraLink(link.id)}
+                    aria-label={`Unlink ${link.jiraIssueKey}`}
+                  >
+                    ×
+                  </button>
+                </Tooltip>
               </span>
             ))
           )}
@@ -419,6 +452,20 @@ export default function TestCaseForm(): ReactElement {
       <hr className="section-divider" />
 
       <form ref={formRef} onSubmit={handleSave} className="test-case-form">
+        <div className="test-case-form-actions">
+          <button
+            type="submit"
+            className="modal-btn modal-btn--primary"
+            aria-disabled={saving}
+          >
+            {saving && <span className="btn-spinner" aria-hidden="true" />}
+            {saving ? 'Saving…' : 'Save'}
+          </button>
+          <span className="test-case-save-hint">
+            or press {SAVE_SHORTCUT_HINT} + S
+          </span>
+        </div>
+            <br />
         {steps.map((step, index) => (
           <div
             key={step.uid}
@@ -428,36 +475,39 @@ export default function TestCaseForm(): ReactElement {
             <div className="test-case-step-header">
               <span className="test-case-step-number">Step {index + 1}</span>
               <div className="test-case-step-header-actions">
-                <button
-                  type="button"
-                  className="test-case-step-move-btn"
-                  onClick={() => handleMoveStepUp(index)}
-                  disabled={index === 0}
-                  title={index === 0 ? 'Already the first step' : `Move step ${index + 1} up`}
-                  aria-label={`Move step ${index + 1} up`}
-                >
-                  ▲
-                </button>
-                <button
-                  type="button"
-                  className="test-case-step-move-btn"
-                  onClick={() => handleMoveStepDown(index)}
-                  disabled={index === steps.length - 1}
-                  title={index === steps.length - 1 ? 'Already the last step' : `Move step ${index + 1} down`}
-                  aria-label={`Move step ${index + 1} down`}
-                >
-                  ▼
-                </button>
-                <button
-                  type="button"
-                  className="test-case-step-delete-btn"
-                  onClick={() => handleDeleteStep(index)}
-                  disabled={steps.length <= 1}
-                  title={steps.length <= 1 ? 'Cannot delete the only step' : `Delete step ${index + 1}`}
-                  aria-label={`Delete step ${index + 1}`}
-                >
-                  <HiOutlineTrash aria-hidden="true" />
-                </button>
+                <Tooltip content={index === 0 ? 'Already the first step' : `Move step ${index + 1} up`}>
+                  <button
+                    type="button"
+                    className="test-case-step-move-btn"
+                    onClick={() => handleMoveStepUp(index)}
+                    disabled={index === 0}
+                    aria-label={`Move step ${index + 1} up`}
+                  >
+                    ▲
+                  </button>
+                </Tooltip>
+                <Tooltip content={index === steps.length - 1 ? 'Already the last step' : `Move step ${index + 1} down`}>
+                  <button
+                    type="button"
+                    className="test-case-step-move-btn"
+                    onClick={() => handleMoveStepDown(index)}
+                    disabled={index === steps.length - 1}
+                    aria-label={`Move step ${index + 1} down`}
+                  >
+                    ▼
+                  </button>
+                </Tooltip>
+                <Tooltip content={steps.length <= 1 ? 'Cannot delete the only step' : `Delete step ${index + 1}`}>
+                  <button
+                    type="button"
+                    className="test-case-step-delete-btn"
+                    onClick={() => handleDeleteStep(index)}
+                    disabled={steps.length <= 1}
+                    aria-label={`Delete step ${index + 1}`}
+                  >
+                    <HiOutlineTrash aria-hidden="true" />
+                  </button>
+                </Tooltip>
               </div>
             </div>
 
@@ -516,7 +566,7 @@ export default function TestCaseForm(): ReactElement {
             + Add step
           </button>
           <span className="test-case-step-add-hint">
-            or press {navigator.userAgent.includes('Mac') ? '⌘ / Ctrl' : 'Ctrl'} + Enter
+            or press {SAVE_SHORTCUT_HINT} + Enter
           </span>
         </div>
 
@@ -530,7 +580,7 @@ export default function TestCaseForm(): ReactElement {
             {saving ? 'Saving…' : 'Save'}
           </button>
           <span className="test-case-save-hint">
-            or press {navigator.userAgent.includes('Mac') ? '⌘ / Ctrl' : 'Ctrl'} + S
+            or press {SAVE_SHORTCUT_HINT} + S
           </span>
         </div>
       </form>

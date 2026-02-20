@@ -8,8 +8,10 @@ import {
   HiOutlinePlayCircle,
   HiOutlineChartBar,
   HiOutlineCog6Tooth,
+  HiOutlineRectangleGroup,
 } from 'react-icons/hi2';
 import type { IconType } from 'react-icons';
+import type { Project } from '../types/testCase';
 
 const EXPAND_DURATION_MS = 300;
 
@@ -33,9 +35,22 @@ export interface SidebarProps {
   onToggle: () => void;
   activeTab: TabId;
   onSelectTab: (id: TabId) => void;
+  workspaceId: number | null;
+  workspaces: Project[];
+  loadingWorkspaces: boolean;
+  onSelectWorkspace: (id: number) => void;
 }
 
-export default function Sidebar({ isOpen, onToggle, activeTab, onSelectTab }: SidebarProps): ReactElement {
+export default function Sidebar({
+  isOpen,
+  onToggle,
+  activeTab,
+  onSelectTab,
+  workspaceId,
+  workspaces,
+  loadingWorkspaces,
+  onSelectWorkspace,
+}: SidebarProps): ReactElement {
   const [labelsVisible, setLabelsVisible] = useState(false);
 
   useEffect(() => {
@@ -45,6 +60,8 @@ export default function Sidebar({ isOpen, onToggle, activeTab, onSelectTab }: Si
     }
     setLabelsVisible(false);
   }, [isOpen]);
+
+  const currentWorkspace = workspaces.find((w) => w.id === workspaceId);
 
   return (
     <aside
@@ -64,6 +81,41 @@ export default function Sidebar({ isOpen, onToggle, activeTab, onSelectTab }: Si
           </span>
         </button>
       </div>
+
+      {/* Workspace selector */}
+      <div className="sidebar-workspace">
+        {isOpen && labelsVisible ? (
+          <div className="sidebar-workspace-expanded">
+            <label htmlFor="workspace-select" className="sidebar-workspace-label">
+              Workspace
+            </label>
+            <select
+              id="workspace-select"
+              className="sidebar-workspace-select"
+              value={workspaceId ?? ''}
+              onChange={(e) => onSelectWorkspace(Number(e.target.value))}
+              disabled={loadingWorkspaces || workspaces.length === 0}
+            >
+              {loadingWorkspaces ? (
+                <option value="">Loading…</option>
+              ) : workspaces.length === 0 ? (
+                <option value="">No workspaces</option>
+              ) : (
+                workspaces.map((w) => (
+                  <option key={w.id} value={w.id}>
+                    {w.name}
+                  </option>
+                ))
+              )}
+            </select>
+          </div>
+        ) : (
+            <div className="sidebar-workspace-icon-wrap" aria-label={currentWorkspace?.name ?? 'Workspace'}>
+              <HiOutlineRectangleGroup className="sidebar-workspace-icon" aria-hidden="true" />
+            </div>
+        )}
+      </div>
+
       <nav className="sidebar-nav">
         {MENU_ITEMS.map((item) => {
           const Icon = item.icon;

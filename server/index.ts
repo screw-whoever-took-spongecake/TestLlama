@@ -4,8 +4,8 @@ import multer from 'multer';
 import { randomUUID } from 'crypto';
 import path from 'path';
 import fs from 'fs';
-import { query, initDb, formatTestCase, formatProject, formatJiraLink, formatTestCaseStep, formatTestRun, formatTestRunStep, getSettingValue, setSettingValue } from './db';
-import type { TestCaseRow, ProjectRow, JiraLinkRow, TestCaseStepRow, TestRunRow, TestRunStepRow } from './db';
+import { query, initDb, formatTestCase, formatProject, formatJiraLink, formatTestCaseStep, formatTestRun, formatTestRunStep, formatTestRunJiraLink, formatFolder, getSettingValue, setSettingValue } from './db';
+import type { TestCaseRow, ProjectRow, JiraLinkRow, TestCaseStepRow, TestRunRow, TestRunStepRow, TestRunJiraLinkRow, FolderRow } from './db';
 import type { TestCaseApi, ProjectApi } from './db';
 
 const app = express();
@@ -47,41 +47,67 @@ export interface ProjectWithCasesApi extends ProjectApi {
 
 app.get('/service/projects', async (_req: Request, res: Response): Promise<void> => {
   try {
-    const projectsResult = await query<ProjectRow>(
-      'SELECT id, name FROM projects ORDER BY name ASC'
+    const projectsResult = await query<ProjectRow & { test_case_count: string }>(
+      `SELECT p.id, p.name, COUNT(tc.id)::int AS test_case_count
+       FROM projects p
+       LEFT JOIN test_cases tc ON tc.project_id = p.id
+       GROUP BY p.id, p.name
+       ORDER BY p.name ASC`
     );
-    const casesResult = await query<TestCaseRow>(
-      'SELECT id, name, project_id FROM test_cases ORDER BY name ASC'
-    );
-
-    // Fetch Jira links grouped by test case id
-    const jiraLinksResult = await query<{ test_case_id: number; jira_issue_key: string }>(
-      'SELECT test_case_id, jira_issue_key FROM jira_links ORDER BY test_case_id'
-    );
-    const jiraKeysByTestCase = new Map<number, string[]>();
-    for (const row of jiraLinksResult.rows) {
-      const list = jiraKeysByTestCase.get(row.test_case_id) ?? [];
-      list.push(row.jira_issue_key);
-      jiraKeysByTestCase.set(row.test_case_id, list);
-    }
-
-    const casesByProject = new Map<number, (TestCaseApi & { jiraIssueKeys: string[] })[]>();
-    for (const row of casesResult.rows) {
-      const list = casesByProject.get(row.project_id) ?? [];
-      list.push({
-        ...formatTestCase(row),
-        jiraIssueKeys: jiraKeysByTestCase.get(row.id) ?? [],
-      });
-      casesByProject.set(row.project_id, list);
-    }
     const body = projectsResult.rows.map((p) => ({
       ...formatProject(p),
-      testCases: casesByProject.get(p.id) ?? [],
+      testCaseCount: Number(p.test_case_count),
     }));
     res.json(body);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Failed to fetch projects' });
+  }
+});
+
+// GET /service/test-cases?projectId=X — flat list for one workspace with folder info
+app.get('/service/test-cases', async (req: Request, res: Response): Promise<void> => {
+  const { projectId } = req.query;
+  if (typeof projectId !== 'string' || !projectId.trim()) {
+    res.status(400).json({ error: 'projectId query parameter is required' });
+    return;
+  }
+  const pid = parseInt(projectId, 10);
+  if (Number.isNaN(pid)) {
+    res.status(400).json({ error: 'Invalid projectId' });
+    return;
+  }
+  try {
+    const casesResult = await query<TestCaseRow & { folder_id: number | null; folder_name: string | null }>(
+      `SELECT tc.id, tc.name, tc.project_id, tc.folder_id, f.name AS folder_name
+       FROM test_cases tc
+       LEFT JOIN test_case_folders f ON f.id = tc.folder_id
+       WHERE tc.project_id = $1
+       ORDER BY tc.name ASC`,
+      [pid]
+    );
+    const jiraLinksResult = await query<{ test_case_id: number; jira_issue_key: string }>(
+      `SELECT test_case_id, jira_issue_key FROM jira_links
+       WHERE test_case_id IN (SELECT id FROM test_cases WHERE project_id = $1)
+       ORDER BY test_case_id`,
+      [pid]
+    );
+    const jiraKeysByCase = new Map<number, string[]>();
+    for (const row of jiraLinksResult.rows) {
+      const list = jiraKeysByCase.get(row.test_case_id) ?? [];
+      list.push(row.jira_issue_key);
+      jiraKeysByCase.set(row.test_case_id, list);
+    }
+    const body = casesResult.rows.map((row) => ({
+      ...formatTestCase(row),
+      folderId: row.folder_id ?? null,
+      folderName: row.folder_name ?? null,
+      jiraIssueKeys: jiraKeysByCase.get(row.id) ?? [],
+    }));
+    res.json(body);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to fetch test cases' });
   }
 });
 
@@ -210,18 +236,6 @@ app.get('/service/test-cases/:id', async (req: Request<{ id: string }>, res: Res
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Failed to fetch test case' });
-  }
-});
-
-app.get('/service/test-cases', async (_req: Request, res: Response): Promise<void> => {
-  try {
-    const result = await query<TestCaseRow>(
-      'SELECT id, name, project_id FROM test_cases ORDER BY name ASC'
-    );
-    res.json(result.rows.map(formatTestCase));
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Failed to fetch test cases' });
   }
 });
 
@@ -572,38 +586,292 @@ app.post('/service/jira/test-cases', async (req: Request<object, object, CreateT
   }
 });
 
+// GET /service/jira/run-links?testRunId=TR-5
+app.get('/service/jira/run-links', async (req: Request, res: Response): Promise<void> => {
+  const { testRunId } = req.query;
+  if (typeof testRunId !== 'string' || !testRunId.trim()) {
+    res.status(400).json({ error: 'Provide testRunId query parameter' });
+    return;
+  }
+  const numericId = testRunId.startsWith('TR-')
+    ? parseInt(testRunId.slice(3), 10)
+    : parseInt(testRunId, 10);
+  if (Number.isNaN(numericId)) {
+    res.status(400).json({ error: 'Invalid testRunId' });
+    return;
+  }
+  try {
+    const result = await query<TestRunJiraLinkRow>(
+      `SELECT id, test_run_id, jira_issue_key, created_at
+       FROM test_run_jira_links WHERE test_run_id = $1
+       ORDER BY created_at DESC`,
+      [numericId]
+    );
+    res.json(result.rows.map(formatTestRunJiraLink));
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to fetch Jira links' });
+  }
+});
+
+interface CreateTestRunJiraLinkBody {
+  testRunId?: unknown;
+  jiraIssueKey?: unknown;
+}
+
+// POST /service/jira/run-links
+app.post('/service/jira/run-links', async (req: Request<object, object, CreateTestRunJiraLinkBody>, res: Response): Promise<void> => {
+  const { testRunId, jiraIssueKey } = req.body;
+  if (!testRunId || typeof testRunId !== 'string') {
+    res.status(400).json({ error: 'testRunId is required (e.g. "TR-5" or "5")' });
+    return;
+  }
+  if (!jiraIssueKey || typeof jiraIssueKey !== 'string' || !jiraIssueKey.trim()) {
+    res.status(400).json({ error: 'jiraIssueKey is required' });
+    return;
+  }
+  const numericId = testRunId.startsWith('TR-')
+    ? parseInt(testRunId.slice(3), 10)
+    : parseInt(testRunId, 10);
+  if (Number.isNaN(numericId)) {
+    res.status(400).json({ error: 'Invalid testRunId' });
+    return;
+  }
+  try {
+    const result = await query<TestRunJiraLinkRow>(
+      `INSERT INTO test_run_jira_links (test_run_id, jira_issue_key)
+       VALUES ($1, $2)
+       ON CONFLICT (test_run_id, jira_issue_key) DO NOTHING
+       RETURNING id, test_run_id, jira_issue_key, created_at`,
+      [numericId, jiraIssueKey.trim().toUpperCase()]
+    );
+    if (result.rowCount === 0) {
+      res.status(409).json({ error: 'Link already exists' });
+      return;
+    }
+    res.status(201).json(formatTestRunJiraLink(result.rows[0]));
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to create Jira link' });
+  }
+});
+
+// DELETE /service/jira/run-links/:id
+app.delete('/service/jira/run-links/:id', async (req: Request<{ id: string }>, res: Response): Promise<void> => {
+  const id = parseInt(req.params.id, 10);
+  if (Number.isNaN(id)) {
+    res.status(400).json({ error: 'Invalid id' });
+    return;
+  }
+  try {
+    const result = await query('DELETE FROM test_run_jira_links WHERE id = $1', [id]);
+    if (result.rowCount === 0) {
+      res.status(404).json({ error: 'Jira link not found' });
+      return;
+    }
+    res.status(204).send();
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to delete Jira link' });
+  }
+});
+
+// ─── Folder endpoints ───────────────────────────────────────────────────────
+
+// GET /service/test-case-folders?projectId=X
+app.get('/service/test-case-folders', async (req: Request, res: Response): Promise<void> => {
+  const { projectId } = req.query;
+  if (typeof projectId !== 'string' || !projectId.trim()) { res.status(400).json({ error: 'projectId query parameter is required' }); return; }
+  const pid = parseInt(projectId, 10);
+  if (Number.isNaN(pid)) { res.status(400).json({ error: 'Invalid projectId' }); return; }
+  try {
+    const result = await query<FolderRow>(
+      'SELECT id, name, project_id FROM test_case_folders WHERE project_id = $1 ORDER BY name ASC',
+      [pid]
+    );
+    res.json(result.rows.map(formatFolder));
+  } catch (err) { console.error(err); res.status(500).json({ error: 'Failed to fetch folders' }); }
+});
+
+interface FolderBody { name?: unknown; projectId?: unknown; }
+
+// POST /service/test-case-folders
+app.post('/service/test-case-folders', async (req: Request<object, object, FolderBody>, res: Response): Promise<void> => {
+  const { name, projectId } = req.body;
+  if (!name || typeof name !== 'string' || !name.trim()) { res.status(400).json({ error: 'Name is required' }); return; }
+  const pid = Number(projectId);
+  if (Number.isNaN(pid) || pid < 1) { res.status(400).json({ error: 'Invalid projectId' }); return; }
+  try {
+    const result = await query<FolderRow>(
+      'INSERT INTO test_case_folders (name, project_id) VALUES ($1, $2) RETURNING id, name, project_id',
+      [name.trim(), pid]
+    );
+    res.status(201).json(formatFolder(result.rows[0]));
+  } catch (err: unknown) {
+    if (err && typeof err === 'object' && 'code' in err && (err as { code: string }).code === '23505') {
+      res.status(409).json({ error: 'A folder with this name already exists' }); return;
+    }
+    console.error(err); res.status(500).json({ error: 'Failed to create folder' });
+  }
+});
+
+// PUT /service/test-case-folders/:id
+app.put('/service/test-case-folders/:id', async (req: Request<{ id: string }, object, FolderBody>, res: Response): Promise<void> => {
+  const id = parseInt(req.params.id, 10);
+  if (Number.isNaN(id)) { res.status(400).json({ error: 'Invalid id' }); return; }
+  const { name } = req.body;
+  if (!name || typeof name !== 'string' || !name.trim()) { res.status(400).json({ error: 'Name is required' }); return; }
+  try {
+    const result = await query<FolderRow>(
+      'UPDATE test_case_folders SET name = $1 WHERE id = $2 RETURNING id, name, project_id',
+      [name.trim(), id]
+    );
+    if (!result.rowCount) { res.status(404).json({ error: 'Folder not found' }); return; }
+    res.json(formatFolder(result.rows[0]));
+  } catch (err: unknown) {
+    if (err && typeof err === 'object' && 'code' in err && (err as { code: string }).code === '23505') {
+      res.status(409).json({ error: 'A folder with this name already exists' }); return;
+    }
+    console.error(err); res.status(500).json({ error: 'Failed to update folder' });
+  }
+});
+
+// DELETE /service/test-case-folders/:id
+app.delete('/service/test-case-folders/:id', async (req: Request<{ id: string }>, res: Response): Promise<void> => {
+  const id = parseInt(req.params.id, 10);
+  if (Number.isNaN(id)) { res.status(400).json({ error: 'Invalid id' }); return; }
+  try {
+    await query('UPDATE test_cases SET folder_id = NULL WHERE folder_id = $1', [id]);
+    const result = await query('DELETE FROM test_case_folders WHERE id = $1', [id]);
+    if (!result.rowCount) { res.status(404).json({ error: 'Folder not found' }); return; }
+    res.status(204).send();
+  } catch (err) { console.error(err); res.status(500).json({ error: 'Failed to delete folder' }); }
+});
+
+// PATCH /service/test-cases/:id/folder
+app.patch('/service/test-cases/:id/folder', async (req: Request<{ id: string }, object, { folderId?: unknown }>, res: Response): Promise<void> => {
+  const numericId = parseTestCaseId(req.params.id);
+  if (Number.isNaN(numericId)) { res.status(400).json({ error: 'Invalid id' }); return; }
+  const folderId = req.body.folderId == null ? null : Number(req.body.folderId);
+  if (folderId !== null && Number.isNaN(folderId)) { res.status(400).json({ error: 'Invalid folderId' }); return; }
+  try {
+    await query('UPDATE test_cases SET folder_id = $1 WHERE id = $2', [folderId, numericId]);
+    res.status(204).send();
+  } catch (err) { console.error(err); res.status(500).json({ error: 'Failed to update folder' }); }
+});
+
+// GET /service/test-run-folders?projectId=X
+app.get('/service/test-run-folders', async (req: Request, res: Response): Promise<void> => {
+  const { projectId } = req.query;
+  if (typeof projectId !== 'string' || !projectId.trim()) { res.status(400).json({ error: 'projectId query parameter is required' }); return; }
+  const pid = parseInt(projectId, 10);
+  if (Number.isNaN(pid)) { res.status(400).json({ error: 'Invalid projectId' }); return; }
+  try {
+    const result = await query<FolderRow>(
+      'SELECT id, name, project_id FROM test_run_folders WHERE project_id = $1 ORDER BY name ASC',
+      [pid]
+    );
+    res.json(result.rows.map(formatFolder));
+  } catch (err) { console.error(err); res.status(500).json({ error: 'Failed to fetch folders' }); }
+});
+
+// POST /service/test-run-folders
+app.post('/service/test-run-folders', async (req: Request<object, object, FolderBody>, res: Response): Promise<void> => {
+  const { name, projectId } = req.body;
+  if (!name || typeof name !== 'string' || !name.trim()) { res.status(400).json({ error: 'Name is required' }); return; }
+  const pid = Number(projectId);
+  if (Number.isNaN(pid) || pid < 1) { res.status(400).json({ error: 'Invalid projectId' }); return; }
+  try {
+    const result = await query<FolderRow>(
+      'INSERT INTO test_run_folders (name, project_id) VALUES ($1, $2) RETURNING id, name, project_id',
+      [name.trim(), pid]
+    );
+    res.status(201).json(formatFolder(result.rows[0]));
+  } catch (err: unknown) {
+    if (err && typeof err === 'object' && 'code' in err && (err as { code: string }).code === '23505') {
+      res.status(409).json({ error: 'A folder with this name already exists' }); return;
+    }
+    console.error(err); res.status(500).json({ error: 'Failed to create folder' });
+  }
+});
+
+// PUT /service/test-run-folders/:id
+app.put('/service/test-run-folders/:id', async (req: Request<{ id: string }, object, FolderBody>, res: Response): Promise<void> => {
+  const id = parseInt(req.params.id, 10);
+  if (Number.isNaN(id)) { res.status(400).json({ error: 'Invalid id' }); return; }
+  const { name } = req.body;
+  if (!name || typeof name !== 'string' || !name.trim()) { res.status(400).json({ error: 'Name is required' }); return; }
+  try {
+    const result = await query<FolderRow>(
+      'UPDATE test_run_folders SET name = $1 WHERE id = $2 RETURNING id, name, project_id',
+      [name.trim(), id]
+    );
+    if (!result.rowCount) { res.status(404).json({ error: 'Folder not found' }); return; }
+    res.json(formatFolder(result.rows[0]));
+  } catch (err: unknown) {
+    if (err && typeof err === 'object' && 'code' in err && (err as { code: string }).code === '23505') {
+      res.status(409).json({ error: 'A folder with this name already exists' }); return;
+    }
+    console.error(err); res.status(500).json({ error: 'Failed to update folder' });
+  }
+});
+
+// DELETE /service/test-run-folders/:id
+app.delete('/service/test-run-folders/:id', async (req: Request<{ id: string }>, res: Response): Promise<void> => {
+  const id = parseInt(req.params.id, 10);
+  if (Number.isNaN(id)) { res.status(400).json({ error: 'Invalid id' }); return; }
+  try {
+    await query('UPDATE test_runs SET folder_id = NULL WHERE folder_id = $1', [id]);
+    const result = await query('DELETE FROM test_run_folders WHERE id = $1', [id]);
+    if (!result.rowCount) { res.status(404).json({ error: 'Folder not found' }); return; }
+    res.status(204).send();
+  } catch (err) { console.error(err); res.status(500).json({ error: 'Failed to delete folder' }); }
+});
+
+// PATCH /service/test-runs/:id/folder
+app.patch('/service/test-runs/:id/folder', async (req: Request<{ id: string }, object, { folderId?: unknown }>, res: Response): Promise<void> => {
+  const id = parseInt(req.params.id, 10);
+  if (Number.isNaN(id)) { res.status(400).json({ error: 'Invalid id' }); return; }
+  const folderId = req.body.folderId == null ? null : Number(req.body.folderId);
+  if (folderId !== null && Number.isNaN(folderId)) { res.status(400).json({ error: 'Invalid folderId' }); return; }
+  try {
+    await query('UPDATE test_runs SET folder_id = $1 WHERE id = $2', [folderId, id]);
+    res.status(204).send();
+  } catch (err) { console.error(err); res.status(500).json({ error: 'Failed to update folder' }); }
+});
+
 // ─── Test Run endpoints ──────────────────────────────────────────────────────
 
 const LOCKED_STATUSES = new Set(['passed', 'failed']);
 
-// GET /service/test-runs — all runs grouped by project
-app.get('/service/test-runs', async (_req: Request, res: Response): Promise<void> => {
+// GET /service/test-runs?projectId=X — flat list for one workspace with folder info
+app.get('/service/test-runs', async (req: Request, res: Response): Promise<void> => {
+  const { projectId } = req.query;
+  if (typeof projectId !== 'string' || !projectId.trim()) {
+    res.status(400).json({ error: 'projectId query parameter is required' });
+    return;
+  }
+  const pid = parseInt(projectId, 10);
+  if (Number.isNaN(pid)) {
+    res.status(400).json({ error: 'Invalid projectId' });
+    return;
+  }
   try {
-    const projectsResult = await query<ProjectRow>('SELECT id, name FROM projects ORDER BY name ASC');
-    const runsResult = await query<TestRunRow>(
-      `SELECT id, name, status, project_id, source_test_case_id, source_test_case_name, created_at, updated_at
-       FROM test_runs ORDER BY name ASC`
+    const runsResult = await query<TestRunRow & { folder_id: number | null; folder_name: string | null }>(
+      `SELECT tr.id, tr.name, tr.status, tr.project_id, tr.source_test_case_id,
+              tr.source_test_case_name, tr.created_at, tr.updated_at,
+              tr.folder_id, f.name AS folder_name
+       FROM test_runs tr
+       LEFT JOIN test_run_folders f ON f.id = tr.folder_id
+       WHERE tr.project_id = $1
+       ORDER BY tr.name ASC`,
+      [pid]
     );
-
-    const runsByProject = new Map<number | null, ReturnType<typeof formatTestRun>[]>();
-    for (const row of runsResult.rows) {
-      const key = row.project_id;
-      const list = runsByProject.get(key) ?? [];
-      list.push(formatTestRun(row));
-      runsByProject.set(key, list);
-    }
-
-    const body: { id: number | null; name: string; testRuns: ReturnType<typeof formatTestRun>[] }[] = [];
-    for (const p of projectsResult.rows) {
-      body.push({ id: p.id, name: p.name, testRuns: runsByProject.get(p.id) ?? [] });
-      runsByProject.delete(p.id);
-    }
-    // Runs whose project was deleted (null project_id)
-    const orphaned = runsByProject.get(null);
-    if (orphaned && orphaned.length > 0) {
-      body.push({ id: null, name: 'Uncategorized', testRuns: orphaned });
-    }
-
+    const body = runsResult.rows.map((row) => ({
+      ...formatTestRun(row),
+      folderId: row.folder_id ?? null,
+      folderName: row.folder_name ?? null,
+    }));
     res.json(body);
   } catch (err) {
     console.error(err);
@@ -701,10 +969,37 @@ app.post('/service/test-runs', async (req: Request<object, object, CreateRunBody
       [tc.id]
     );
     for (const step of stepsResult.rows) {
+      // Deep-copy each attachment file so this run is fully independent of the
+      // source test case. Deleting attachments from the test case later won't
+      // affect runs that were already created.
+      const copiedAttachments: { id: string; filename: string; mimeType: string; url: string }[] = [];
+      try {
+        const originals = JSON.parse(step.attachments || '[]') as Array<{
+          id?: string; filename?: string; mimeType?: string; url?: string; dataUrl?: string;
+        }>;
+        if (Array.isArray(originals)) {
+          for (const att of originals) {
+            if (!att.id) continue;
+            const ext = att.mimeType === 'image/png' ? '.png' : '.jpg';
+            const srcPath = path.join(UPLOADS_DIR, `${att.id}${ext}`);
+            if (!fs.existsSync(srcPath)) continue; // stale reference — skip silently
+            const newId = randomUUID();
+            const destPath = path.join(UPLOADS_DIR, `${newId}${ext}`);
+            await fs.promises.copyFile(srcPath, destPath);
+            copiedAttachments.push({
+              id: newId,
+              filename: att.filename ?? '',
+              mimeType: att.mimeType ?? (att.id.endsWith('.png') ? 'image/png' : 'image/jpeg'),
+              url: `/service/uploads/${newId}${ext}`,
+            });
+          }
+        }
+      } catch { /* keep empty on malformed JSON */ }
+
       await query(
         `INSERT INTO test_run_steps (test_run_id, position, step_description, expected_results, attachments, actual_results, actual_result_attachments, checked)
          VALUES ($1, $2, $3, $4, $5, '', '', FALSE)`,
-        [run.id, step.position, step.step_description, step.expected_results, step.attachments]
+        [run.id, step.position, step.step_description, step.expected_results, JSON.stringify(copiedAttachments)]
       );
     }
 
@@ -755,7 +1050,7 @@ app.put('/service/test-runs/:id', async (req: Request<{ id: string }, object, Up
       return;
     }
 
-    const validStatuses = ['ready_to_test', 'passed', 'failed', 'na'];
+    const validStatuses = ['ready_to_test', 'in_progress', 'passed', 'failed', 'na'];
     if (status != null && (typeof status !== 'string' || !validStatuses.includes(status))) {
       res.status(400).json({ error: `status must be one of: ${validStatuses.join(', ')}` });
       return;

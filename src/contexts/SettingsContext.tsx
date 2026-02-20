@@ -32,7 +32,7 @@ export function SettingsProvider({ children }: { children: ReactNode }): ReactEl
   }, []);
 
   useEffect(() => {
-    fetchSettings();
+    void fetchSettings();
   }, [fetchSettings]);
 
   async function updateSettings(patch: Partial<AppSettings>): Promise<void> {

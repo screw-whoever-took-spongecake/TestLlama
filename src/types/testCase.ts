@@ -17,6 +17,8 @@ export interface TestCase {
   id: string;
   name: string;
   projectId: number;
+  folderId?: number | null;
+  folderName?: string | null;
   jiraIssueKeys?: string[];
   steps?: TestCaseStep[];
 }
@@ -24,12 +26,13 @@ export interface TestCase {
 export interface Project {
   id: number;
   name: string;
+  testCaseCount?: number;
 }
 
-export interface ProjectWithCases {
+export interface TestCaseFolder {
   id: number;
   name: string;
-  testCases: TestCase[];
+  projectId: number;
 }
 
 export interface JiraLink {

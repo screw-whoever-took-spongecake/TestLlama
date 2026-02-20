@@ -2,6 +2,8 @@ import { useState, useRef } from 'react';
 import type { ReactElement, DragEvent, ChangeEvent } from 'react';
 import { HiOutlineTrash } from 'react-icons/hi2';
 import type { StepAttachment } from '../types/testCase';
+import ImageLightbox from './ImageLightbox';
+import Tooltip from './Tooltip';
 
 const MAX_FILE_BYTES = 2 * 1024 * 1024; // 2 MB
 const MAX_ATTACHMENTS = 10;
@@ -47,6 +49,7 @@ export default function StepAttachmentsUpload({
 }: StepAttachmentsUploadProps): ReactElement {
   const [dragging, setDragging] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  const [lightbox, setLightbox] = useState<{ src: string; alt: string } | null>(null);
 
   async function processFiles(files: FileList | File[]): Promise<void> {
     if (disabled) return;
@@ -77,11 +80,11 @@ export default function StepAttachmentsUpload({
   function handleDrop(e: DragEvent<HTMLDivElement>): void {
     e.preventDefault();
     setDragging(false);
-    if (!disabled && e.dataTransfer.files.length) processFiles(e.dataTransfer.files);
+    if (!disabled && e.dataTransfer.files.length) void processFiles(e.dataTransfer.files);
   }
 
   function handleInputChange(e: ChangeEvent<HTMLInputElement>): void {
-    if (e.target.files?.length) processFiles(e.target.files);
+    if (e.target.files?.length) void processFiles(e.target.files);
     e.target.value = '';
   }
 
@@ -96,73 +99,87 @@ export default function StepAttachmentsUpload({
   return (
     <div className="test-case-step-attachments">
       <span className="test-case-step-label">{label}</span>
-      <div
-        className={`step-attachments-drop-zone${dragging ? ' step-attachments-drop-zone--active' : ''}${isFull || disabled ? ' step-attachments-drop-zone--full' : ''}`}
-        onDragOver={(e) => { e.preventDefault(); if (!disabled && !isFull) setDragging(true); }}
-        onDragLeave={() => setDragging(false)}
-        onDrop={handleDrop}
-        aria-label="Image attachment drop zone"
-        title={disabled ? disabledTitle : undefined}
-      >
-        <span className="step-attachments-drop-hint">
-          {disabled
-            ? 'Attachments cannot be added'
-            : isFull
-              ? `Maximum of ${MAX_ATTACHMENTS} attachments reached.`
-              : 'Drag \u0026 drop PNG or JPG images here'}
-        </span>
-        <button
-          type="button"
-          className="modal-btn modal-btn--secondary step-attachments-browse-btn"
-          onClick={() => inputRef.current?.click()}
-          disabled={disabled || isFull}
-          title={disabled ? disabledTitle : isFull ? `Maximum of ${MAX_ATTACHMENTS} attachments per step` : undefined}
+      <Tooltip content={disabled ? disabledTitle : undefined} display="block">
+        <div
+          className={`step-attachments-drop-zone${dragging ? ' step-attachments-drop-zone--active' : ''}${isFull || disabled ? ' step-attachments-drop-zone--full' : ''}`}
+          onDragOver={(e) => { e.preventDefault(); if (!disabled && !isFull) setDragging(true); }}
+          onDragLeave={() => setDragging(false)}
+          onDrop={handleDrop}
+          aria-label="Image attachment drop zone"
         >
-          Browse
-        </button>
-        <span className="step-attachments-limit-hint">
-          {attachments.length}/{MAX_ATTACHMENTS} · Max 2 MB per image
-        </span>
-        <input
-          ref={inputRef}
-          id={`step-attachments-input-${uid}`}
-          type="file"
-          accept=".png,.jpg,.jpeg"
-          multiple
-          className="step-attachments-file-input"
-          onChange={handleInputChange}
-          aria-hidden="true"
-          tabIndex={-1}
-          disabled={disabled}
-        />
-      </div>
+          <span className="step-attachments-drop-hint">
+            {disabled
+              ? 'Attachments cannot be added'
+              : isFull
+                ? `Maximum of ${MAX_ATTACHMENTS} attachments reached.`
+                : 'Drag \u0026 drop PNG or JPG images here'}
+          </span>
+          <Tooltip content={disabled ? disabledTitle : isFull ? `Maximum of ${MAX_ATTACHMENTS} attachments per step` : undefined}>
+            <button
+              type="button"
+              className="modal-btn modal-btn--secondary step-attachments-browse-btn"
+              onClick={() => inputRef.current?.click()}
+              disabled={disabled || isFull}
+            >
+              Browse
+            </button>
+          </Tooltip>
+          <span className="step-attachments-limit-hint">
+            {attachments.length}/{MAX_ATTACHMENTS} · Max 2 MB per image
+          </span>
+          <input
+            ref={inputRef}
+            id={`step-attachments-input-${uid}`}
+            type="file"
+            accept=".png,.jpg,.jpeg"
+            multiple
+            className="step-attachments-file-input"
+            onChange={handleInputChange}
+            aria-hidden="true"
+            tabIndex={-1}
+            disabled={disabled}
+          />
+        </div>
+      </Tooltip>
 
       {error && (
         <p className="step-attachments-error" role="alert">{error}</p>
+      )}
+
+      {lightbox && (
+        <ImageLightbox
+          src={lightbox.src}
+          alt={lightbox.alt}
+          onClose={() => setLightbox(null)}
+        />
       )}
 
       {attachments.length > 0 && (
         <div className="step-attachments-grid">
           {attachments.map((att) => (
             <div key={att.id} className="step-attachment-thumb">
-              <img
-                src={att.url}
-                alt={att.filename}
-                className="step-attachment-img"
-              />
+              <Tooltip content="Click to enlarge">
+                <img
+                  src={att.url}
+                  alt={att.filename}
+                  className="step-attachment-img step-attachment-img--clickable"
+                  onClick={() => setLightbox({ src: att.url, alt: att.filename })}
+                />
+              </Tooltip>
               <span className="step-attachment-name" title={att.filename}>
                 {att.filename}
               </span>
               {!disabled && (
-                <button
-                  type="button"
-                  className="step-attachment-remove"
-                  onClick={() => removeAttachment(att.id)}
-                  aria-label={`Remove attachment ${att.filename}`}
-                  title="Remove"
-                >
-                  <HiOutlineTrash aria-hidden="true" />
-                </button>
+                <Tooltip content="Remove">
+                  <button
+                    type="button"
+                    className="step-attachment-remove"
+                    onClick={() => removeAttachment(att.id)}
+                    aria-label={`Remove attachment ${att.filename}`}
+                  >
+                    <HiOutlineTrash aria-hidden="true" />
+                  </button>
+                </Tooltip>
               )}
             </div>
           ))}

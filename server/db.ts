@@ -30,10 +30,13 @@ export interface JiraLinkRow {
   created_at: string;
 }
 
+export type TestRunStatus = 'ready_to_test' | 'in_progress' | 'passed' | 'failed' | 'na';
+export type StepStatus = 'not_run' | 'passed' | 'failed' | 'na' | 'passed_with_improvements';
+
 export interface TestRunRow {
   id: number;
   name: string;
-  status: string;
+  status: TestRunStatus;
   project_id: number | null;
   source_test_case_id: number | null;
   source_test_case_name: string;
@@ -51,7 +54,7 @@ export interface TestRunStepRow {
   actual_results: string;
   actual_result_attachments: string;
   checked: boolean;
-  step_status: string;
+  step_status: StepStatus;
 }
 
 const pool = new Pool({
@@ -167,6 +170,52 @@ export async function initDb(): Promise<void> {
     )
   `);
 
+  await query(`
+    CREATE TABLE IF NOT EXISTS test_run_jira_links (
+      id SERIAL PRIMARY KEY,
+      test_run_id INTEGER NOT NULL REFERENCES test_runs(id) ON DELETE CASCADE,
+      jira_issue_key TEXT NOT NULL,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      UNIQUE(test_run_id, jira_issue_key)
+    )
+  `);
+
+  await query(`
+    CREATE TABLE IF NOT EXISTS test_case_folders (
+      id SERIAL PRIMARY KEY,
+      name TEXT NOT NULL,
+      project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      UNIQUE(name, project_id)
+    )
+  `);
+
+  await query(`
+    CREATE TABLE IF NOT EXISTS test_run_folders (
+      id SERIAL PRIMARY KEY,
+      name TEXT NOT NULL,
+      project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      UNIQUE(name, project_id)
+    )
+  `);
+
+  // Migrate: add folder_id to test_cases
+  const tcFolderCol = await query(
+    `SELECT column_name FROM information_schema.columns
+     WHERE table_name = 'test_cases' AND column_name = 'folder_id'`
+  );
+  if (!tcFolderCol.rowCount || tcFolderCol.rowCount === 0) {
+    await query('ALTER TABLE test_cases ADD COLUMN folder_id INTEGER REFERENCES test_case_folders(id) ON DELETE SET NULL');
+  }
+
+  // Migrate: add folder_id to test_runs
+  const trFolderCol = await query(
+    `SELECT column_name FROM information_schema.columns
+     WHERE table_name = 'test_runs' AND column_name = 'folder_id'`
+  );
+  if (!trFolderCol.rowCount || trFolderCol.rowCount === 0) {
+    await query('ALTER TABLE test_runs ADD COLUMN folder_id INTEGER REFERENCES test_run_folders(id) ON DELETE SET NULL');
+  }
+
   // Migrate: add step_status column to existing test_run_steps tables
   const stepStatusCol = await query(
     `SELECT column_name FROM information_schema.columns
@@ -231,6 +280,22 @@ export function formatTestCase(row: TestCaseRow): TestCaseApi {
   };
 }
 
+export interface FolderRow {
+  id: number;
+  name: string;
+  project_id: number;
+}
+
+export interface FolderApi {
+  id: number;
+  name: string;
+  projectId: number;
+}
+
+export function formatFolder(row: FolderRow): FolderApi {
+  return { id: row.id, name: row.name, projectId: row.project_id };
+}
+
 export function formatTestCaseStep(row: TestCaseStepRow): TestCaseStepApi {
   let attachments: StepAttachmentApi[] = [];
   try {
@@ -270,12 +335,35 @@ export function formatJiraLink(row: JiraLinkRow): JiraLinkApi {
   };
 }
 
+export interface TestRunJiraLinkRow {
+  id: number;
+  test_run_id: number;
+  jira_issue_key: string;
+  created_at: string;
+}
+
+export interface TestRunJiraLinkApi {
+  id: number;
+  testRunId: string;
+  jiraIssueKey: string;
+  createdAt: string;
+}
+
+export function formatTestRunJiraLink(row: TestRunJiraLinkRow): TestRunJiraLinkApi {
+  return {
+    id: row.id,
+    testRunId: `TR-${row.test_run_id}`,
+    jiraIssueKey: row.jira_issue_key,
+    createdAt: row.created_at,
+  };
+}
+
 // ─── Test Run helpers ──────────────────────────────────────────────────────
 
 export interface TestRunApi {
   id: number;
   name: string;
-  status: string;
+  status: TestRunStatus;
   projectId: number | null;
   sourceTestCaseId: number | null;
   sourceTestCaseName: string;
@@ -292,7 +380,7 @@ export interface TestRunStepApi {
   actualResults: string;
   actualResultAttachments: StepAttachmentApi[];
   checked: boolean;
-  stepStatus: string;
+  stepStatus: StepStatus;
 }
 
 export function formatTestRun(row: TestRunRow): TestRunApi {
